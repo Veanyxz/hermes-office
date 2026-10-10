@@ -143,15 +143,17 @@ engine (read-only `GET /api/hermes/doctor` → `runDoctor` in
 `fail`, or `unknown` ("tidak bisa dipastikan" — reported, never forced green).
 There is currently **no UI** for it: the topbar carries no `A2A` / `Siap pakai?`
 button and `src/components/DoctorPanel.tsx` + `src/components/A2aPanel.tsx`
-were deleted (UI-CLEAN-1). Call the API directly with curl (port 3300 is the
-systemd unit; `npm run dev` serves 3001, `npm start` serves 3000):
+were deleted (UI-CLEAN-1). Call the API directly with curl. There is no fixed port —
+`npm run dev` serves 3001, `npm start` serves 3000, and this repo ships no systemd unit;
+use whichever one your server is on (see [📡 Ports](#-ports)):
 
 ```bash
-curl -s http://127.0.0.1:3300/api/hermes/doctor | python3 -m json.tool
-curl -s http://127.0.0.1:3300/api/hermes/selfrepair | python3 -m json.tool  # pratinjau
-curl -s -X POST http://127.0.0.1:3300/api/hermes/selfrepair \
+PORT=3000   # npm start -> 3000 ; npm run dev -> 3001
+curl -s http://127.0.0.1:$PORT/api/hermes/doctor | python3 -m json.tool
+curl -s http://127.0.0.1:$PORT/api/hermes/selfrepair | python3 -m json.tool  # pratinjau
+curl -s -X POST http://127.0.0.1:$PORT/api/hermes/selfrepair \
   -H 'Content-Type: application/json' -d '{}' | python3 -m json.tool       # jalankan
-curl -s http://127.0.0.1:3300/api/hermes/a2a/transcript | python3 -m json.tool  # riwayat A2A
+curl -s http://127.0.0.1:$PORT/api/hermes/a2a/transcript | python3 -m json.tool  # riwayat A2A
 ```
 
 Per-agent A2A state (served/unlisted, the three-state "A2A Ready" checklist,
@@ -193,13 +195,14 @@ re-installable patch and the five-item contract are documented at
 and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) §7.7 "Kontrak Hermes yang
 dibutuhkan". Read those two before blaming the office for a red check.
 
-**Check it yourself** (proof, not promises — 3300 is the systemd unit;
-`npm run dev` serves 3001, `npm start` serves 3000):
+**Check it yourself** (proof, not promises — `PORT` below is 3000 for
+`npm start` or 3001 for `npm run dev`, whichever you started):
 
 ```bash
-curl -s http://127.0.0.1:3300/api/hermes/doctor | python3 -m json.tool
-curl -s http://127.0.0.1:3300/api/hermes/selfrepair | python3 -m json.tool
-curl -s http://127.0.0.1:3300/api/hermes/a2a/transcript | python3 -m json.tool
+PORT=3000   # npm start -> 3000 ; npm run dev -> 3001
+curl -s http://127.0.0.1:$PORT/api/hermes/doctor | python3 -m json.tool
+curl -s http://127.0.0.1:$PORT/api/hermes/selfrepair | python3 -m json.tool
+curl -s http://127.0.0.1:$PORT/api/hermes/a2a/transcript | python3 -m json.tool
 # unknown A2A path must be REJECTED, not answered (needs docs/patches/ applied):
 curl -s -X POST http://127.0.0.1:9900/zz-tidak-ada \
   -H 'Content-Type: application/json' \
@@ -251,13 +254,16 @@ hermes config get custom_providers --json
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js 18.17+ or 20+
-- A local Hermes install (the board is driven through its CLI)
-- npm, pnpm, or bun
+- **Node.js 20.9 or newer.** `package.json` declares `engines.node >= 20`, and Next.js
+  16.4 hard-refuses to start below `20.9.0` — `node -v` must show `v20.9.0` or higher.
+- **npm.** The repo ships a `package-lock.json`, so `npm ci` gives a pinned install.
+  There is no `pnpm-lock.yaml` / `yarn.lock` / `bun.lockb`, so installing with another
+  package manager resolves fresh versions and is not a reproducible install.
+- A local Hermes install (the board is driven through its CLI).
 
 ### 1. Clone the repository
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/Veanyxz/hermes-virtual-office.git
 cd hermes-virtual-office
 ```
 
@@ -268,8 +274,12 @@ cp .env.example .env.local
 
 Edit `.env.local` to configure your Hermes instance:
 ```env
-# REQUIRED: path to the hermes executable (the board is driven through its CLI)
-HERMES_BIN=/usr/local/bin/hermes
+# Path to the hermes executable (the board is driven through its CLI).
+# Optional if `hermes` is already on PATH — the code falls back to running
+# plain `hermes` when this is unset. Set it when the binary lives elsewhere:
+#   HERMES_BIN=/usr/local/bin/hermes                      # Linux/macOS
+#   HERMES_BIN=C:/Users/<you>/.../venv/Scripts/hermes.exe  # Windows
+# HERMES_BIN=/usr/local/bin/hermes
 
 # Optional: pin a board, or set a CLI timeout
 # HERMES_KANBAN_BOARD=default
@@ -287,24 +297,73 @@ settings. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what each drives.
 
 ### 3. Install & Run
 ```bash
-npm install
-npm run dev
+npm ci          # pinned install from package-lock.json (npm install works too)
+npm run dev     # -> http://127.0.0.1:3001
 ```
 
-`npm run dev` binds **http://127.0.0.1:3001** (dev only, loopback). For a production
-build use `npm run build && npm start`, which serves on **http://127.0.0.1:3000**.
+`npm run dev` binds **http://127.0.0.1:3001** — development only, loopback only.
+
+For production:
+```bash
+npm run build
+npm start       # -> http://127.0.0.1:3000
+```
+
+### 📡 Ports
+
+Everything this app listens on, and how to change it:
+
+| What | Default | Change it |
+|---|---|---|
+| Dev server (`npm run dev`) | **127.0.0.1:3001** | `npm run dev -- --port <port>` — no `package.json` edit needed |
+| Production (`npm start`) | **127.0.0.1:3000** | `PORT=<port> npm start` (Next.js reads `PORT`) |
+| A2A server (Hermes side) | **127.0.0.1:9900** | `hermes config set platforms.a2a.port <port> --force` — must match `A2A_PORT` in `.env.local` |
+
+All three bind **loopback only** (`127.0.0.1`), so none of them is reachable from
+the network by default. To serve the office to other hosts, put a reverse proxy in
+front — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — and list the public address in
+`ALLOWED_ORIGINS`, or every button that writes returns 403.
+
+**Nothing in this repo binds port 3300.** The `curl` examples further down were
+written against a production server on **3000**; swap in whatever port your own
+server is on.
+
+**If 3001 or 3000 is already taken** (another app, another office instance), Next.js
+fails to bind. Start on a free port instead — a trailing `--port` wins over the one
+baked into the script, so `package.json` does not have to be edited:
+```bash
+npm run dev -- --port 3007             # dev, overrides the script's 3001
+PORT=3005 npm start                    # production
+```
+
+**Next 16 allows only one dev server per directory.** Starting a second one boots
+normally (`✓ Ready in ...`) and then exits with `⨯ Another next dev server is already
+running`, pointing at the live PID. Stop the existing one first:
+```bash
+taskkill /PID <pid> /F                 # Windows
+kill <pid>                             # macOS / Linux
+```
 
 ---
 
-## 🐳 Docker Deployment
+## 🐳 Deployment
 
-Run with Docker Compose in a single command:
+**This repo ships no Dockerfile and no compose file** — `docker compose up -d` has
+nothing to read, so the one-liner older revisions of this README showed could not have
+worked. Deployment here is a plain Node process:
 
 ```bash
-docker compose up -d
+npm ci
+npm run build
+PORT=3000 npm start
 ```
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production guidelines with Nginx/Traefik and SSL.
+The office must run **on the same host as Hermes**: the board is driven through
+`hermes kanban ... --json`, not over HTTP (see
+[⚠️ Prerequisites you should know](#️-prerequisites-you-should-know)).
+
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) covers systemd, Nginx/Traefik and SSL —
+copy the unit file from there rather than expecting one in this repo.
 
 ---
 
