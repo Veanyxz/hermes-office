@@ -91,16 +91,29 @@ export function woodWarm() {
 }
 
 /** Kaca nyata — railing & jendela (transmisi, bukan opacity). */
+/**
+ * Kaca.
+ *
+ * Dulunya `MeshPhysicalMaterial` dengan `transmission: 0.9`. Transmisi bukan fitur
+ * murah: saat ada SATU material transmisi di scene, three.js merender SELURUH scene
+ * ke tekstur cadangan lalu memindainya lagi lewat material itu — dua kali kerja
+ * rasterisasi untuk semua yang ada di layar, hanya demi memindah kaca di belakang
+ * kaca. Di kantor ini kaca berdiri sendiri di depan langit atau dinding polos, jadi
+ * yang benar-benar terlihat dari peta adalah warna, kilau, dan opasitasnya.
+ *
+ * Tiga besi inilah yang dipakai: warna biru pucat, kilau rendah (memantulkan langit
+ * lewat environment map), dan opasitas 0.42 — hasilnya kaca yang sama terbaca,
+ * tanpa satu pun pass rasterisasi tambahan.
+ */
 export function glassReal() {
-  return new THREE.MeshPhysicalMaterial({
-    color: 0xd6e8f0,
-    roughness: 0.05,
-    metalness: 0,
-    transmission: 0.9,
-    thickness: 0.05,
+  return new THREE.MeshStandardMaterial({
+    color: 0xcfe4ef,
+    roughness: 0.08,
+    metalness: 0.1,
     transparent: true,
-    opacity: 0.5,
+    opacity: 0.42,
     side: THREE.DoubleSide,
+    depthWrite: false,
   })
 }
 

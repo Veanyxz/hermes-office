@@ -20,6 +20,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 
 import { buildOffice, type OfficeProps } from './build'
+import { batchStaticMeshes, type BatchStats } from './batch'
 import type { Health } from './health'
 import { buildAvatar } from './avatar'
 import { animate, type Activity, type AnimAgent } from './anim'
@@ -180,7 +181,9 @@ function selectiveShadow(root: THREE.Object3D, light: THREE.DirectionalLight) {
   cam.near = 1
   cam.far = 110
   cam.updateProjectionMatrix()
-  light.shadow.mapSize.set(2048, 2048)
+  // 1536²: texel ~4 cm untuk plot 68 m — di bawah ketajaman tepi geometri, jadi
+  // 2048 hanya membuang 44% texel baca tanpa terlihat.
+  light.shadow.mapSize.set(1536, 1536)
   light.shadow.bias = -0.0004
   light.shadow.normalBias = 0.02
 }
@@ -242,10 +245,28 @@ export function createScene(
   labelHost: HTMLElement,
   events: SceneEvents = {},
 ) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+  //
+  // SETINGAN RENDER, ditimbang satu per satu:
+  //
+  //  - `antialias` tetap nyala: MSAA jauh lebih murah daripada kesan bergerigi di
+  //    tepi meja dan tiang yang dilihat terus-menerus.
+  //  - Pixel ratio DIBATASI 1.5, bukan 2. Layar 4K dengan rasio 2 meminta GPU
+  //    menghitung empat kali lipat piksel untuk detail yang tak terlihat pada
+  //    jarak pandang kamera kantor ini. 1.5 sudah tajam, dan 1/3 lebih murah.
+  //  - `powerPreference` meminta GPU diskret, bukan terintegrasi yang hemat daya —
+  //    di laptop, kantor ini sering jatuh ke GPU hemat dan terasa 30% lebih lambat.
+  //  - Bayangan PCF biasa, bukan PCF-soft: radius 4 pada 2048 matriks bayangan
+  //    adalah empat kali sampel per fragment untuk bayangan yang ujungnya tetap
+  //    kabur oleh peta bayangan itu sendiri. PCF biasa + radius 2 terlihat sama
+  //    dari kamera kantor dan membaca peta bayangan sekali.
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    powerPreference: 'high-performance',
+  })
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5))
   renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  renderer.shadowMap.type = THREE.PCFShadowMap
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.1
   renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -271,7 +292,22 @@ export function createScene(
       .format(new Date()),
   )
   const office: OfficeProps = buildOffice(scene, hour)
-  office.sun.shadow.radius = 4
+
+  // ---- batching -------------------------------------------------------------
+  // Kantor ini dibangun dari ~1.600 mesh kecil; menggabungkan yang statis per
+  // material menurunkan draw call dari ribuan menjadi ratusan. Dijalankan SEBELUM
+  // selectiveShadow supaya yang dinilai "besar atau kecil" adalah mesh gabungan,
+  // bukan serpihan aslinya — kalau dibalik, setiap gabungan otomatis dianggap
+  // besar dan kembali memancarkan bayangan yang tadinya sudah disaring.
+  const pinned = new Set<THREE.Object3D>([
+    ...office.monitors,
+    ...office.streaks,
+    office.boardSurface,
+    office.healthBulb,
+  ])
+  const batch = batchStaticMeshes([office.group, office.streetGroup], pinned)
+
+  office.sun.shadow.radius = 2
   selectiveShadow(office.group, office.sun)
   selectiveShadow(office.streetGroup, office.sun)
 
@@ -844,10 +880,13 @@ export function createScene(
 
   function setQuality(q: number) {
     quality = Math.max(0, Math.min(2, q))
-    renderer.setPixelRatio(q === 2 ? Math.min(devicePixelRatio, 2) : 1)
+    renderer.setPixelRatio(q === 2 ? Math.min(devicePixelRatio, 1.5) : 1)
     renderer.shadowMap.enabled = q > 0
     renderer.shadowMap.needsUpdate = true
-    office.sun.shadow.mapSize.set(q === 2 ? 2048 : 1024, q === 2 ? 2048 : 1024)
+    // 1536 bukan 2048: peta bayangan 2048² untuk plot 68 m memberi texel ~3 cm —
+    // di bawah ketajaman tepi geometri. 1536² tetap di bawah 4 cm dan membaca
+    // ~44% lebih sedikit texel tiap frame bayangan.
+    office.sun.shadow.mapSize.set(q === 2 ? 1536 : 1024, q === 2 ? 1536 : 1024)
     office.sun.shadow.map?.dispose()
     office.sun.shadow.map = null
     if (q < 2) {
@@ -1308,6 +1347,10 @@ export function createScene(
     renderer.domElement.removeEventListener('mousedown', onDown)
     renderer.domElement.removeEventListener('mouseup', onUp)
     renderer.dispose()
+    // Geometri gabungan (dan serpihan yang kini yatim) dibuang di sini; tanpa ini
+    // pindah view 3D → Kanban → 3D membentuk ulang konteks WebGL TANPA pernah
+    // melepas memori GPU yang lama.
+    batch.dispose()
   }
 
   /** Snapshot used by the debug handle and the rename UI. */
@@ -1367,6 +1410,20 @@ export function createScene(
     resize,
     dispose,
     avatarSnapshot,
+    /**
+     * Angka RENDER yang sesungguhnya (bukan perkiraan dari jumlah mesh).
+     *
+     * `renderer.info` baru valid SETELAH satu frame digambar, jadi nilai di sini selalu
+     * membaca "frame terakhir". Dipakai untuk membuktikan optimasi berat-ringannya
+     * dengan cara yang tidak bisa berdebat: draw call dan segitiga yang benar-benar
+     * dikirim ke GPU.
+     */
+    renderInfo() {
+      const i = renderer.info.render
+      return { calls: i.calls, triangles: i.triangles, points: i.points, lines: i.lines, frame: i.frame }
+    },
+    /** Statistik penggabungan geometri — untuk membuktikan berat sebelum/sesudah. */
+    batchStats: batch,
     /**
      * Advance the simulation by hand, for tests.
      *

@@ -529,6 +529,14 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
 
   const monitors: THREE.Mesh[] = []
   const lamps: THREE.PointLight[] = []
+  /**
+   * Shade lampu meja (kerucut kecil yang menyala).
+   *
+   * Menjadi pengganti PointLight per meja: applyPalette menaikkan emissive-nya saat
+   * malam, sehingga meja tetap terlihat "menyala" tanpa sepuluh lampu titik yang
+   * membebani seluruh material standar di frame.
+   */
+  const lampShades: THREE.Mesh[] = []
   const streaks: THREE.Mesh[] = []
 
   const add = (m: THREE.Object3D, y = 0) => {
@@ -685,6 +693,8 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
       }
       // the bar, resting in the hooks
       const bar = cyl(0.035, 0.035, 2.2, 0xb9c0c6, 12, 0.85)
+      // DYNAMIC: bar dan platnya di-show/hide per frame oleh setRackBarVisible.
+      bar.userData.dynamic = true
       bar.rotation.z = Math.PI / 2
       bar.position.set(0, GYM.rack.barY, 0)
       g.add(bar)
@@ -700,6 +710,7 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
           [0.97, 0.15],
         ] as const) {
           const plate = cyl(r, r, 0.07, 0x24282c, 18, 0.55)
+          plate.userData.dynamic = true
           plate.rotation.z = Math.PI / 2
           plate.position.set(side * off, GYM.rack.barY, 0)
           g.add(plate)
@@ -1434,15 +1445,24 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
     { x: 21, z: 8, w: 12, y: LEVEL_H - 0.35 },
     { x: 0, z: 18, w: 20, y: LEVEL_H - 0.35 },
   ]
-  for (const p of panelRows) {
+  // Setengah panelnya memang TIDAK mendapat lampu titik sendiri. Delapan lampu titik
+  // di ruangan tertutup berarti setiap material standar menghitung delapan lampu tiap
+  // fragment — padahal panel yang menyala (emissive) sudah memberi kesan cahaya pada
+  // mata, dan jarak 22 m membuat empat lampu tersebar cukup merata. Delapan → empat,
+  // satu baris tiap zona, tanpa perubahan yang terlihat nyata dari kamera.
+  panelRows.forEach((p, i) => {
     const panel = box(p.w, 0.05, 0.4, 0xffffff, { emissive: 0xfff4e0, ei: 1 })
+    // DYNAMIC: applyPalette mengubah emissiveIntensity panel ini tiap pergantian jam.
+    panel.userData.dynamic = true
     panel.position.set(p.x, p.y, p.z)
     group.add(panel)
     streaks.push(panel)
-    const l = new THREE.PointLight(0xfff6e6, 0.5, 22)
+    if (i % 2 !== 0) return
+    const l = new THREE.PointLight(0xfff6e6, 0.6, 26)
     l.position.set(p.x, p.y - 0.4, p.z)
     group.add(l)
-  }
+    lamps.push(l)
+  })
 
   /* ---------------------------------------------------------- room plaques -- */
   // Flat on a wall face at 1.70 m. Every placement is a wall segment named in ROOM_PLAQUES, so
@@ -1492,7 +1512,9 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
     emissiveIntensity: 0.9,
     roughness: 0.3,
   })
+  // DYNAMIC: warna/emissive bohlam diubah setHealth sesuai derajat kesehatan.
   const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.19, 16, 12), healthMat)
+  bulb.userData.dynamic = true
   bulb.position.y = 1.62
   healthGroup.add(bulb)
   // cahaya sungguhan, supaya warna lampunya jatuh ke lantai dan tidak hanya jadi bola berwarna
@@ -2118,14 +2140,21 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
     const arm = cyl(0.025, 0.025, 0.42, 0x6d7378, 8, 0.6)
     arm.position.set(0.66, 0.94, -0.3)
     g.add(arm)
-    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.16, 12, 1, true), stdMat(0xf0e2c4, { emissive: 0xffd89a, ei: hour >= 18 || hour < 6 ? 0.9 : 0.2 }))
+    //
+    // TIDAK ADA PointLight di sini lagi, dan itu disengaja demi performa: sepuluh meja
+    // berarti sepuluh lampu titik, dan biaya setiap lampu titik dibayar SEMUA material
+    // standar di frame itu — bukan hanya meja yang dekat. Cahaya ruangan diserahkan ke
+    // lampu panel plafon (4), matahari, dan hemisphere; keteduhan meja tetap terbaca
+    // dari shade yang menyala lewat emissive, dan applyPalette menaikkan emissive itu
+    // saat malam — perannya persis seperti lampu meja sebelumnya, tanpa tagihan GPU-nya.
+    const shade = new THREE.Mesh(
+      new THREE.ConeGeometry(0.12, 0.16, 12, 1, true),
+      stdMat(0xf0e2c4, { emissive: 0xffd89a, ei: hour >= 18 || hour < 6 ? 0.9 : 0.2 }),
+    )
     shade.position.set(0.66, 1.12, -0.3)
     shade.rotation.x = 0.5
     g.add(shade)
-    const lamp = new THREE.PointLight(0xffdcae, hour >= 18 || hour < 6 ? 0.5 : 0.12, 4.5)
-    lamp.position.set(0.66, 1.05, -0.3)
-    g.add(lamp)
-    lamps.push(lamp)
+    lampShades.push(shade)
     // chair: seat, back, star base
     const chair = new THREE.Group()
     chair.position.set(DESK_CHAIR.x, 0, DESK_CHAIR.z)
@@ -3049,6 +3078,8 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
   const foliage: { group: THREE.Group; phase: number }[] = []
   const tree = (x: number, z: number, scale = 1) => {
     const t = new THREE.Group()
+    // DYNAMIC: dedaunan digoyang angin tiap frame di animateStreet.
+    t.userData.dynamic = true
     t.position.set(x, 0, z)
     const trunk = cyl(0.14 * scale, 0.2 * scale, 2.0 * scale, 0x6b5138, 8)
     trunk.position.y = 1.0 * scale
@@ -3111,6 +3142,10 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
 
   const makeWalker = (color: number) => {
     const g = new THREE.Group()
+    // DYNAMIC: badan pejalan kaki digerakkan tiap frame (animateStreet). Menandai di
+    // sini membuat batch.ts (penggabung geometri statis) menyisihkan seluruh subtree
+    // ini — menggabungkannya akan membekukan semua pejalan di satu titik.
+    g.userData.dynamic = true
     const body = box(0.34, 0.62, 0.22, color, { rough: 0.8 })
     body.position.y = 1.05
     g.add(body)
@@ -3154,6 +3189,8 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
 
   const makeVehicle = (color: number) => {
     const c = new THREE.Group()
+    // DYNAMIC: kendaraan meluncur tiap frame (animateStreet) — jangan digabung batch.ts.
+    c.userData.dynamic = true
     const body = box(4.0, 0.85, 1.8, color, { metal: 0.45, rough: 0.35 })
     body.position.y = 0.75
     c.add(body)
@@ -3255,8 +3292,15 @@ export function buildOffice(scene: THREE.Scene, hour: number) {
     sun.intensity = night ? 1.2 : 2.6
     sun.color.setHex(night ? 0xc9d8ee : 0xfff4e2)
     fill.intensity = night ? 0.35 : 0.45
-    for (const l of lamps) l.intensity = night ? 0.85 : 0.25
-    for (const s of streaks) (s.material as THREE.MeshStandardMaterial).emissiveIntensity = night ? 1.5 : 0.85
+    for (const l of lamps) l.intensity = night ? 1.1 : 0.3
+    for (const s of streaks) (s.material as THREE.MeshStandardMaterial).emissiveIntensity = night ? 1.7 : 0.85
+    // Lampu meja tidak punya lampu titik lagi (lihat blok meja di atas); peran "menyala
+    // saat malam" dipegang emissive shade. Inilah satu-satunya tempat yang mengaturnya,
+    // jadi jam berganti = sepuluh meja berubah bersama.
+    for (const s of lampShades) {
+      const m = s.material as THREE.MeshStandardMaterial
+      m.emissiveIntensity = night ? 1.2 : 0.18
+    }
   }
 
   function dispose() {
