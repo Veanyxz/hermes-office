@@ -11,6 +11,8 @@
  * which is why every posed arm ended up beside the ears.
  */
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { rbox } from './bevel'
 import { BALL_R, ROLE_COLORS } from './layout'
 import type { AgentRole } from '@/types/hermes'
 
@@ -115,6 +117,142 @@ const SHIN = 0.46
 
 const mat = (color: number, rough = 0.7) =>
   new THREE.MeshStandardMaterial({ color, roughness: rough })
+
+/* ------------------------------------------------------------ body shapes -- */
+
+/**
+ * A box that tapers: the top face scaled by `top`, the bottom face by `bot`.
+ *
+ * `BoxGeometry` puts half its 24 vertices above the mid-plane and half below, so scaling
+ * each half independently turns it into a narrowing prism at ZERO extra triangles — the
+ * silhouette is what changes, not the cost. `computeVertexNormals` then relights the
+ * taper so the narrowing actually catches light instead of shading like a flat wall.
+ *
+ * This is the whole difference between a torso and a standing carton. A human is never
+ * the same width from shoulder to waist: the shoulders are the widest point, the chest
+ * tucks in, the waist narrower still. A constant-width box cannot say any of that, and
+ * the eye reads "carton" long before it reads "person".
+ */
+function taper(g: THREE.BufferGeometry, top: number, bot = top): THREE.BufferGeometry {
+  const p = g.attributes.position as THREE.BufferAttribute
+  for (let i = 0; i < p.count; i++) {
+    const s = p.getY(i) > 0 ? top : bot
+    p.setX(i, p.getX(i) * s)
+    p.setZ(i, p.getZ(i) * s)
+  }
+  p.needsUpdate = true
+  g.computeVertexNormals()
+  return g
+}
+
+/** Multiply a hex colour's channels — used for collar/belt that must read as the shirt,
+ *  just in shadow. Clamped so a dark role colour cannot wrap around to bright. */
+function shade(color: number, k: number): number {
+  const r = Math.min(255, Math.round(((color >> 16) & 255) * k))
+  const g = Math.min(255, Math.round(((color >> 8) & 255) * k))
+  const b = Math.min(255, Math.round((color & 255) * k))
+  return (r << 16) | (g << 8) | b
+}
+
+/**
+ * Hair colour and skin tone, both derived from a name.
+ *
+ * Ten bodies in one room all with the same hair and the same complexion reads as clones
+ * — the office looks like one model copy-pasted. Neither choice is random: a given agent
+ * must look identical on every reload and in every screenshot, so both are hashed off a
+ * seed string (the agent's name) rather than taken from `Math.random()`.
+ */
+const HAIR_TONES = [0x2b2723, 0x4a3428, 0x191512, 0x6b4a2a, 0x7d7671, 0x3d2b1f]
+export const SKIN_TONES = [0xe9c19a, 0xd9a97c, 0xf0d0b0, 0xc08a5e, 0x8a5f42, 0xf5ddc4]
+
+/** FNV-1a — stable across runs and machines, unlike a date-seeded PRNG. */
+function hash01(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0) / 4294967295
+}
+
+/** The skin tone an agent with this name should wear, stable across reloads. */
+export function skinFor(seed: string): number {
+  return SKIN_TONES[Math.floor(hash01(seed + '\u0000skin') * SKIN_TONES.length)]
+}
+
+/**
+ * Merge many small parts — each already transformed into its parent's frame — into ONE
+ * geometry carrying a flat colour per part.
+ *
+ * Eleven meshes for one head meant eleven draw calls per head, times ten bodies in the
+ * room, and that was the single largest addition the face made to the frame. The parts
+ * never move relative to each other: eyes sit on the face, the face sits under the hair.
+ * Merging them costs nothing visually and gives back ten draw calls per avatar.
+ *
+ * The colour rides in a `color` attribute rather than in the material, so one
+ * `vertexColors` material renders skin, hair, brows and eyes together.
+ *
+ * `mergeGeometries` refuses to mix indexed and non-indexed buffers and needs every
+ * attribute present, so everything is normalised to non-indexed with position, normal,
+ * uv and color — the same care `batch.ts` takes for the office itself.
+ */
+/** Scale, then rotate about Z, then translate — applied straight into the vertices so a
+ *  part arrives at `mergeColored` already sitting in its parent's frame. Order matters:
+ *  scaling after translating would stretch the part away from where it was aimed. */
+function place(
+  g: THREE.BufferGeometry,
+  x: number,
+  y: number,
+  z: number,
+  rz = 0,
+  sx = 1,
+  sy = 1,
+  sz = 1,
+): THREE.BufferGeometry {
+  if (sx !== 1 || sy !== 1 || sz !== 1) g.scale(sx, sy, sz)
+  if (rz) g.rotateZ(rz)
+  g.translate(x, y, z)
+  return g
+}
+
+function mergeColored(parts: { g: THREE.BufferGeometry; color: number }[]): THREE.BufferGeometry {
+  const geos: THREE.BufferGeometry[] = []
+  for (const { g, color } of parts) {
+    const geo = g.index ? g.toNonIndexed() : g.clone()
+    for (const name of Object.keys(geo.attributes)) {
+      if (!['position', 'normal', 'uv'].includes(name)) geo.deleteAttribute(name)
+    }
+    if (!geo.attributes.uv) {
+      geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(geo.attributes.position.count * 2), 2))
+    }
+    if (!geo.attributes.normal) geo.computeVertexNormals()
+    // `THREE.Color` converts the hex from sRGB into the LINEAR working space, which is
+    // what a `vertexColors` material reads. Writing the raw hex bytes instead — which is
+    // what this did first — left every merged part a second conversion too light: hair
+    // 0x241f1c came out as #696260 grey, brows vanished into the skin, and the shirt hem
+    // turned pale. It read as "the face was never modelled" when the parts were all
+    // there, just painted the wrong colour.
+    const n = geo.attributes.position.count
+    const col = new Float32Array(n * 3)
+    const rgb = new THREE.Color(color)
+    const r = rgb.r
+    const gr = rgb.g
+    const b = rgb.b
+    for (let i = 0; i < n; i++) {
+      col[i * 3] = r
+      col[i * 3 + 1] = gr
+      col[i * 3 + 2] = b
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
+    geo.clearGroups()
+    geos.push(geo)
+  }
+  const merged = mergeGeometries(geos, false)
+  for (const geo of geos) geo.dispose()
+  if (!merged) throw new Error('mergeColored: attribute sets did not match')
+  merged.computeBoundingSphere()
+  return merged
+}
 
 /* -------------------------------------------------------- held equipment -- */
 
@@ -347,10 +485,13 @@ function buildBowlingBall(): THREE.Group {
   return g
 }
 
-export function buildAvatar(role: AgentRole, skin = 0xe9c19a): Avatar {
+export function buildAvatar(role: AgentRole, skin = 0xe9c19a, seed: string = role): Avatar {
   const group = new THREE.Group()
   const accent = ROLE_COLORS[role] ?? 0x6f8fa8
   const trouser = 0x46505a
+  // Hair follows the seed, not the role: two developers must not share a haircut colour,
+  // or the room still reads as clones wearing different shirts.
+  const HAIR = HAIR_TONES[Math.floor(hash01(seed + '\u0000hair') * HAIR_TONES.length)]
 
   // ---- legs (built first so the hip sits at the top of them)
   const hips = new THREE.Group()
@@ -362,18 +503,42 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a): Avatar {
     const hipJoint = new THREE.Group()
     hipJoint.position.set(side * HIP_X, 0, 0)
     hips.add(hipJoint)
-    const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.15, THIGH, 0.15), mat(trouser))
+    // Thigh and shin are tapered CYLINDERS, not boxes. A leg is thickest at the hip and
+    // at the calf and thinnest at the knee and ankle; a constant-width box gets none of
+    // that, which is why the old legs read as two stacked planks. Ten radial segments
+    // (40 triangles) are enough to look round from the office camera and no more.
+    //
+    // Joint positions are untouched — the poses in anim.ts are written against these
+    // numbers, and facing.ts measures the feet from them.
+    const thigh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.088, 0.072, THIGH, 10),
+      mat(trouser),
+    )
     thigh.position.y = -THIGH / 2
     hipJoint.add(thigh)
     const knee = new THREE.Group()
     knee.position.y = -THIGH
     hipJoint.add(knee)
-    const shin = new THREE.Mesh(new THREE.BoxGeometry(0.13, SHIN, 0.13), mat(0x39424b))
+    const shin = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.072, 0.055, SHIN, 10),
+      mat(0x39424b),
+    )
     shin.position.y = -SHIN / 2
     knee.add(shin)
-    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.08, 0.26), mat(0x2f3438))
-    foot.position.set(0, -SHIN + 0.02, 0.05)
-    knee.add(foot)
+    // A shoe, not a slab: rounded toe box over a thin lighter sole, pushed forward so the
+    // figure stands ON its feet instead of balancing on a centred brick.
+    //
+    // The sole's BOTTOM is kept at exactly -SHIN - 0.02, the same height the old foot box
+    // reached. Every seated pose in layout.ts is tuned against that contact point, so
+    // moving it would re-seat every agent in the room by a centimetre.
+    const shoe = new THREE.Mesh(
+      mergeColored([
+        { g: place(rbox(0.15, 0.08, 0.27, 0.032), 0, -SHIN + 0.02, 0.048), color: 0x2f3438 },
+        { g: place(rbox(0.156, 0.016, 0.276, 0.007), 0, -SHIN - 0.012, 0.048), color: 0xdad3c6 },
+      ]),
+      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78 }),
+    )
+    knee.add(shoe)
     legMeshes.push(thigh, shin)
     return { shoulder: hipJoint, elbow: knee }
   }
@@ -388,28 +553,119 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a): Avatar {
   waist.position.y = 0
   hips.add(waist)
 
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(TORSO_W, TORSO_H, TORSO_D), mat(accent))
-  torso.position.y = TORSO_H / 2
+  // Tapered torso: widest at the shoulders, narrowing to the waist. This is the single
+  // biggest reason the old body read as a carton — a human silhouette is never the same
+  // width from shoulder to hip, and the eye clocks the flat sides instantly.
+  // The SHOULDER YOKE is the part that was missing, and its absence is why the arms
+  // read as detached.
+  //
+  // The shoulder joint hangs at CHEST_Y + SHOULDER_Y = 0.80, but the torso is only
+  // TORSO_H = 0.66 tall. That leaves a 14 cm void above the ribcage where the arms
+  // begin, with nothing beside them. The old 12 cm-wide box arms happened to be wide
+  // enough to visually bridge it; tapered cylinders are not, so the arms started to
+  // hover.
+  //
+  // The yoke is a separate wider mass spanning 0.60-0.82, reaching out past SHOULDER_X
+  // = 0.25 so both joints sit inside it. It is merged into the TORSO rather than kept
+  // as its own mesh for two reasons: one fewer draw call per avatar, and it then takes
+  // the swim recolour with the rest of the shirt — bare shoulders are what a swimmer
+  // should have, and a leftover shirt-coloured pad across the shoulders is not.
+  // Centre sits at 0.675 and reaches to 0.75 — deliberately SHORT of the shoulder joint
+  // at 0.80. Pushing it all the way up to the joint is the obvious move and it is wrong:
+  // the head's lower edge is at 0.67, so a yoke topping out at 0.80 buries the bottom
+  // of the face. The DELTOID caps on the arms are what cover the joint itself; this only
+  // has to widen the ribcage out to SHOULDER_X = 0.25 so the caps land on a body.
+  const yoke = place(
+    taper(rbox(0.46, 0.15, TORSO_D * 0.94, 0.05), 0.94, 1.0),
+    0,
+    0.675,
+    0,
+  )
+  const torso = new THREE.Mesh(
+    mergeColored([
+      { g: place(taper(rbox(TORSO_W, TORSO_H, TORSO_D, 0.05), 1.0, 0.84), 0, TORSO_H / 2, 0), color: accent },
+      { g: yoke, color: shade(accent, 0.93) },
+    ]),
+    mat(0xffffff),
+  )
   waist.add(torso)
+
+  // Shirt hem and collar, merged into one mesh.
+  //
+  // The hem is a darker band at the bottom of the torso, so the shirt has an edge instead
+  // of running into the trousers as one unbroken column. The collar sits at the neck
+  // opening — enough to say "shirt" from the office camera without modelling a lapel.
+  //
+  // Both take the swim recolour, so they are one material and one draw call, and both
+  // go bare with the torso rather than leaving a coloured ring hovering at the neck.
+  const hem = new THREE.Mesh(
+    mergeColored([
+      { g: place(rbox(TORSO_W * 0.87, 0.045, TORSO_D * 0.9, 0.018), 0, 0.022, 0), color: shade(accent, 0.72) },
+      {
+        // Sits ON TOP of the shoulder yoke (which reaches 0.75), not at TORSO_H —
+        // parked at the old height it vanished inside the yoke and left no collar at all.
+        g: place(rbox(0.2, 0.032, TORSO_D * 0.72, 0.013), 0, 0.752, 0.01, -0.18),
+        color: shade(accent, 0.8),
+      },
+    ]),
+    mat(0xffffff),
+  )
+  waist.add(hem)
 
   const chest = new THREE.Group()
   chest.position.y = CHEST_Y
   waist.add(chest)
 
-  const neckMesh = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.09, 0.12), mat(skin, 0.85))
+  // Neck as a cylinder: a box neck shows its corners through the jaw on every head turn.
+  const neckMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.1, 12), mat(skin, 0.85))
   neckMesh.position.y = 0.045
   const neck = new THREE.Group()
   neck.add(neckMesh)
   chest.add(neck)
 
-  const headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.29, 0.31, 0.29), mat(skin, 0.85))
-  headMesh.position.y = 0.16
   const head = new THREE.Group()
+
+  // ---- face and hair, merged into ONE mesh --------------------------------
+  // The head was a bare cube: no eyes, no features, so every agent in the room was an
+  // anonymous box on a stick. These parts are all children of the HEAD group, so they
+  // track every head turn the poses make without the animation layer knowing they exist.
+  //
+  // They are merged rather than kept as eleven meshes because eleven meshes is eleven
+  // draw calls per head, times ten bodies in the room. The parts never move relative to
+  // each other, so merging is free visually and gives back the draw calls.
+  //
+  // Everything is placed in the HEAD GROUP's frame by baking the transform into the
+  // geometry before the merge; the merged mesh itself sits at the group's origin.
+  const headParts: { g: THREE.BufferGeometry; color: number }[] = [
+    // shell — widest at the crown, tapering toward the jaw
+    { g: place(rbox(0.28, 0.3, 0.275, 0.075), 0, 0.16, 0), color: skin },
+    // eyes: dark, slightly recessed, sized to read at office-camera distance
+    { g: place(new THREE.SphereGeometry(0.026, 10, 8), -0.058, 0.185, 0.129), color: 0x241f1c },
+    { g: place(new THREE.SphereGeometry(0.026, 10, 8), 0.058, 0.185, 0.129), color: 0x241f1c },
+    // brows: tilted down toward the outside. Flat bars read as a unibrow; the tilt is
+    // what makes a neutral face look like it is thinking.
+    { g: place(rbox(0.058, 0.015, 0.02, 0.006, 1), -0.058, 0.228, 0.132, 0.12), color: HAIR },
+    { g: place(rbox(0.058, 0.015, 0.02, 0.006, 1), 0.058, 0.228, 0.132, -0.12), color: HAIR },
+    // nose and mouth: the smallest marks that stop a face reading as blank
+    { g: place(rbox(0.026, 0.04, 0.032, 0.01), 0, 0.152, 0.134), color: shade(skin, 0.9) },
+    { g: place(rbox(0.05, 0.013, 0.02, 0.005, 1), 0, 0.106, 0.131), color: shade(skin, 0.58) },
+    // ears: flattened rounds sized off the head so they cannot float free of it
+    { g: place(new THREE.SphereGeometry(0.034, 8, 6), -0.136, 0.165, 0, 0, 0.42, 0.85, 0.7), color: shade(skin, 0.95) },
+    { g: place(new THREE.SphereGeometry(0.034, 8, 6), 0.136, 0.165, 0, 0, 0.42, 0.85, 0.7), color: shade(skin, 0.95) },
+    // hair: a cap over the crown plus a fall down the back, tapering at the hairline
+    // instead of ending in a hard horizontal cut across the forehead
+    { g: place(taper(rbox(0.3, 0.15, 0.295, 0.062), 1.0, 0.9), 0, 0.268, 0), color: HAIR },
+    { g: place(rbox(0.295, 0.15, 0.1, 0.04), 0, 0.2, -0.105), color: HAIR },
+  ]
+  const headMesh = new THREE.Mesh(
+    mergeColored(headParts),
+    // One roughness for the whole head. Eyes want to be glossier than skin, but a single
+    // material is what makes the merge possible, and at office distance the difference
+    // is invisible.
+    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82 }),
+  )
   head.add(headMesh)
-  // hair cap so the head reads as a head and not a cube
-  const hair = new THREE.Mesh(new THREE.BoxGeometry(0.305, 0.1, 0.305), mat(0x2b2723, 0.9))
-  hair.position.y = 0.13
-  head.add(hair)
+
   neck.add(head)
 
   // role badge floats above the head; colour-coded by role
@@ -421,20 +677,61 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a): Avatar {
   badge.position.y = 1.98
   group.add(badge)
 
+  // Collected so the swim swap can strip them with the rest of the shirt (see `skinnable`).
+  const cuffs: THREE.Mesh[] = []
   const makeArm = (side: number): Limb => {
     const shoulder = new THREE.Group()
     shoulder.position.set(side * SHOULDER_X, SHOULDER_Y, 0)
     chest.add(shoulder)
-    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.12, UPPER_ARM, 0.12), mat(accent))
-    upper.position.y = -UPPER_ARM / 2
+    // DELTOID plus sleeve, merged into one mesh.
+    //
+    // The deltoid is a rounded cap sitting ON the shoulder joint. The joint is a bare
+    // pivot at (SHOULDER_X, SHOULDER_Y) with a cylinder hanging off it, so without a
+    // cap the arm meets the body at a hard corner and reads as bolted on beside the
+    // torso instead of growing out of it. The cap fills that corner, and merging it
+    // with the sleeve keeps it at one draw call.
+    //
+    // The sleeve itself ends mid-upper-arm, as a real sleeve does, so the arm is shirt
+    // then skin rather than one unbroken colour from shoulder to fingertip.
+    const upper = new THREE.Mesh(
+      mergeColored([
+        {
+          g: place(new THREE.SphereGeometry(0.1, 10, 8), 0, -0.02, 0, 0, 1.05, 0.92, 1.0),
+          color: accent,
+        },
+        {
+          g: place(new THREE.CylinderGeometry(0.062, 0.052, UPPER_ARM, 10), 0, -UPPER_ARM / 2, 0),
+          color: accent,
+        },
+      ]),
+      mat(0xffffff),
+    )
     shoulder.add(upper)
+    const cuff = new THREE.Mesh(rbox(0.115, 0.028, 0.115, 0.012), mat(shade(accent, 0.72)))
+    cuff.position.y = -UPPER_ARM + 0.012
+    shoulder.add(cuff)
+    cuffs.push(cuff)
     const elbow = new THREE.Group()
     elbow.position.y = -UPPER_ARM
     shoulder.add(elbow)
-    const fore = new THREE.Mesh(new THREE.BoxGeometry(0.1, FOREARM, 0.1), mat(skin, 0.85))
+    // Forearm tapers toward the wrist — thickest just below the elbow.
+    const fore = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.042, FOREARM, 10),
+      mat(skin, 0.85),
+    )
     fore.position.y = -FOREARM / 2
     elbow.add(fore)
-    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.09, 0.08), mat(skin, 0.85))
+    // The hand keeps its EXACT old offset: FIST_FROM_ELBOW is FOREARM + 0.03, and anim.ts
+    // places every held item by that number. Moving it breaks the barbell, the burger and
+    // the bowling ball all at once.
+    // Sized to the WRIST, not to a mitten. The forearm now tapers to r=0.042, and a
+    // 9.8 cm-wide hand on an 8.4 cm wrist left the two reading as separate objects with
+    // daylight between them — which is exactly what a screenshot showed: a pale shape
+    // hovering beside the arm.
+    // The offset stays EXACTLY FOREARM + 0.03 = FIST_FROM_ELBOW. anim.ts places every
+    // held item by that constant — the barbell, the burger, the bowling ball — so
+    // nudging it for looks would quietly unstick the props from the hands.
+    const hand = new THREE.Mesh(rbox(0.086, 0.1, 0.066, 0.028), mat(skin, 0.85))
     hand.position.y = -FOREARM - 0.03
     elbow.add(hand)
     return { shoulder, elbow }
@@ -465,18 +762,30 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a): Avatar {
   //
   // Parented to the HIPS, so the trunks stay on the body when the waist lays a swimmer flat.
   const trunks = new THREE.Group()
-  const trunkBody = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.3, 0.31), mat(0x1f3a5f))
+  const trunkBody = new THREE.Mesh(
+    taper(rbox(0.46, 0.3, 0.31, 0.06), 1.0, 0.92),
+    mat(0x1f3a5f),
+  )
   trunkBody.position.y = -0.11
   trunks.add(trunkBody)
-  // a lighter waistband, which is what makes a navy box read as trunks and not as shorts
-  const waistband = new THREE.Mesh(new THREE.BoxGeometry(0.47, 0.06, 0.32), mat(0x33639e))
+  // a lighter waistband, which is what makes a navy shape read as trunks and not as shorts
+  const waistband = new THREE.Mesh(rbox(0.468, 0.058, 0.318, 0.022), mat(0x33639e))
   waistband.position.y = 0.03
   trunks.add(waistband)
   trunks.visible = false
   hips.add(trunks)
 
   const colorOf = (m: THREE.Mesh) => ((m.material as THREE.MeshStandardMaterial).color.getHex())
-  const skinnable: { mesh: THREE.Mesh; color: number }[] = [torso, ...legMeshes].map((m) => ({
+  // The shirt HEM, COLLAR and both SLEEVES CUFFS go in too. The swim swap is a colour
+  // change, so anything left wearing shirt colours would float as a coloured band around
+  // a bare body — a collar ring hovering at the neck is worse than no collar at all.
+  // They are all separate meshes from the torso, so none of them were picked up by it.
+  const skinnable: { mesh: THREE.Mesh; color: number }[] = [
+    torso,
+    ...legMeshes,
+    hem,
+    ...cuffs,
+  ].map((m) => ({
     mesh: m,
     color: colorOf(m),
   }))

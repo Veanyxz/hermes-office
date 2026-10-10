@@ -22,7 +22,7 @@ import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRe
 import { buildOffice, type OfficeProps } from './build'
 import { batchStaticMeshes, type BatchStats } from './batch'
 import type { Health } from './health'
-import { buildAvatar } from './avatar'
+import { buildAvatar, skinFor } from './avatar'
 import { animate, type Activity, type AnimAgent } from './anim'
 import { blocked, onStairArea, planRoute, stairCentre, BODY_R, type Level, type Waypoint } from './nav'
 import {
@@ -358,7 +358,11 @@ export function createScene(
   }
 
   function makeAvatar(row: AvatarState, data: Agent): SceneAgent {
-    const av = buildAvatar(data.role)
+    // Skin and hair are hashed off the agent's NAME, so eleven bodies in one room are not
+    // eleven copies of the same face. The name is the only value that is stable across
+    // reloads and identical on every machine — a random draw would repaint everyone every
+    // time the page opened, and the office would lose its cast.
+    const av = buildAvatar(data.role, skinFor(row.name), row.name)
     av.group.userData.agentName = row.name
     av.group.userData.avatarId = row.avatarId
     av.group.userData.kind = row.kind

@@ -521,11 +521,30 @@ function benchpress(a: AnimAgent, t: number) {
  * Recolouring cannot move a joint, so every pose written against the rig keeps working
  * unchanged — the hands, the knees and the feet all stay exactly where they were measured.
  */
+/**
+ * Put the body in trunks and bare skin, or dress it again.
+ *
+ * `hem` (shirt hem + collar) is ONE merged mesh carrying its two shirt shades as VERTEX
+ * colors, which is what makes it a single draw call instead of two. Vertex colors
+ * MULTIPLY the material colour, so leaving them on during the swap would multiply the
+ * skin tone by a dark shirt shade and paint the swimmer a muddy brown — while
+ * `material.color` still read back as exactly `skin`, so every check would pass.
+ *
+ * The vertex-color flag therefore has to flip with the swap. Flipping it recompiles the
+ * shader, so it is done only on the actual transition: `swim()` calls this every frame,
+ * and recompiling per frame would hitch visibly.
+ */
 function dressForSwim(a: AnimAgent, on: boolean) {
   const sw = a.avatar.swimwear
   sw.trunks.visible = on
   for (const s of sw.skinnable) {
-    ;(s.mesh.material as THREE.MeshStandardMaterial).color.setHex(on ? a.avatar.skin : s.color)
+    const m = s.mesh.material as THREE.MeshStandardMaterial
+    const wantColor = on ? a.avatar.skin : s.color
+    if (m.vertexColors === on) {
+      m.vertexColors = !on
+      m.needsUpdate = true
+    }
+    if (m.color.getHex() !== wantColor) m.color.setHex(wantColor)
   }
 }
 

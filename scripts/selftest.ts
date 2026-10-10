@@ -484,15 +484,38 @@ console.log('geometry')
     let lowest = Infinity
     for (const leg of av.legs) {
       for (const child of leg.elbow.children) {
-        const p = new THREE.Vector3()
-        child.getWorldPosition(p)
-        const g = (child as THREE.Mesh).geometry as THREE.BoxGeometry
-        lowest = Math.min(lowest, p.y - g.parameters.height / 2)
+        // The WORLD position of the geometry's bounding-box CENTRE, minus half its local
+        // Y extent — the exact formula this check has always used, kept deliberately.
+        //
+        // The first repair here read `geometry.parameters.height`, which is pinned at 1
+        // for `RoundedBoxGeometry`: it builds a 1x1x1 box and scales the vertices, so the
+        // cast typechecked while the number was meaningless. That subtracted half a metre
+        // below every foot and reported a foot 2 cm off the seat as 48 cm off.
+        //
+        // The obvious replacement — `Box3.setFromObject` — is NOT equivalent and must not
+        // be swapped in: it applies each child's full world matrix, and the foot hangs
+        // 0.48 m from a knee that folds by up to 80 degrees when seated. Under that, the
+        // swing reads as a height change and the sofa moves 4 cm, the stool 6 cm — with
+        // the geometry unchanged to a millimetre.
+        //
+        // SEATS was tuned against centre-minus-half-extent with the rotation left out of
+        // the half-extent only. Reproducing it exactly here is what keeps the numbers the
+        // tuning was solved for; the model measures correctly, and only the tiny
+        // half-extent (4 cm on the shoe) stays unrotated.
+        //
+        // Note the geometry itself did NOT move: the sole's bottom is at -SHIN - 0.02,
+        // the same height the old foot box reached, because every seated pose in
+        // layout.ts is tuned against that contact point.
+        const g = (child as THREE.Mesh).geometry as THREE.BufferGeometry
+        if (!g.boundingBox) g.computeBoundingBox()
+        const box = g.boundingBox as THREE.Box3
+        const centre = box.getCenter(new THREE.Vector3()).applyMatrix4(child.matrixWorld)
+        lowest = Math.min(lowest, centre.y - (box.max.y - box.min.y) / 2)
       }
     }
     const want = s.footY ?? 0
-    // 2 cm: the foot box is a slab, so the sole is flat and this is tight enough to
-    // catch the 9 cm and 13 cm errors that were there before.
+    // 2 cm: the shoe is a rounded box, so its lowest vertex is still the flat sole, and
+    // this stays tight enough to catch the 9 cm and 13 cm errors that were there before.
     if (Math.abs(lowest - want) > 0.02) {
       problems.push(
         `${name}: feet at ${lowest.toFixed(3)} but must be ${want.toFixed(3)} (${((lowest - want) * 100).toFixed(0)} cm off)`,
