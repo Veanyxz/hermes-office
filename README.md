@@ -263,8 +263,8 @@ hermes config get custom_providers --json
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/Veanyxz/hermes-virtual-office.git
-cd hermes-virtual-office
+git clone https://github.com/Veanyxz/hermes-office.git
+cd hermes-office
 ```
 
 ### 2. Configure Environment
