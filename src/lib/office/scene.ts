@@ -1189,9 +1189,6 @@ export function createScene(
         mat.emissiveIntensity += (target - mat.emissiveIntensity) * Math.min(1, dt * 4)
       }
 
-      a.avatar.badge.rotation.z = t * 0.8 + a.phase
-      a.avatar.badge.position.y = 1.85 + Math.sin(t * 1.6 + a.phase) * 0.03
-
       if (a.bubbleTimer > 0) {
         a.bubbleTimer -= dt * 1000
         if (a.bubbleTimer <= 0) a.bubble.visible = false

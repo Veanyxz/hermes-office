@@ -41,7 +41,6 @@ export type Avatar = {
   waist: THREE.Object3D
   arms: [Limb, Limb]
   legs: [Limb, Limb]
-  badge: THREE.Mesh
   /**
    * Equipment the avatar can hold.
    *
@@ -105,7 +104,20 @@ const TORSO_D = 0.24
 /** The chest group sits on top of the torso; its Y is the shoulder's origin. */
 export const CHEST_Y = TORSO_H
 /** Shoulder joint, below the chest top. */
-export const SHOULDER_Y = 0.14
+/**
+ * Shoulder joint height ABOVE the chest origin — which is the top of the torso and the
+ * base of the neck.
+ *
+ * This was 0.14, putting the joint at world y 1.78 while the head spans 1.65-1.98: the
+ * shoulders sat level with the middle of the face, the deltoid caps read as a pair of
+ * balls beside the head, and the hands only reached 1.15 on a body whose hips are at
+ * 0.98 — arms too short to hang, held up beside the skull.
+ *
+ * 0 is where the anatomy actually is: the shoulder joint at the top of the ribcage,
+ * level with the base of the neck. Fingertips then land at 0.99 against hips at 0.98,
+ * which is where a standing person's hands hang.
+ */
+export const SHOULDER_Y = 0
 export const SHOULDER_X = 0.25
 export const UPPER_ARM = 0.32
 export const FOREARM = 0.30
@@ -556,29 +568,24 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a, seed: string = rol
   // Tapered torso: widest at the shoulders, narrowing to the waist. This is the single
   // biggest reason the old body read as a carton — a human silhouette is never the same
   // width from shoulder to hip, and the eye clocks the flat sides instantly.
-  // The SHOULDER YOKE is the part that was missing, and its absence is why the arms
-  // read as detached.
+  // The SHOULDER YOKE: a wider mass across the top of the ribcage, reaching out past
+  // SHOULDER_X = 0.25 so both shoulder joints sit INSIDE it rather than on its edge.
+  // Without it the joint is a bare pivot with an arm hanging off it, and the arm reads
+  // as bolted on beside the torso instead of growing out of it.
   //
-  // The shoulder joint hangs at CHEST_Y + SHOULDER_Y = 0.80, but the torso is only
-  // TORSO_H = 0.66 tall. That leaves a 14 cm void above the ribcage where the arms
-  // begin, with nothing beside them. The old 12 cm-wide box arms happened to be wide
-  // enough to visually bridge it; tapered cylinders are not, so the arms started to
-  // hover.
+  // Merged into the TORSO rather than kept as its own mesh: one fewer draw call per
+  // avatar, and it then takes the swim recolour with the rest of the shirt — bare
+  // shoulders are what a swimmer should have, and a leftover shirt-coloured pad across
+  // the shoulders is not.
   //
-  // The yoke is a separate wider mass spanning 0.60-0.82, reaching out past SHOULDER_X
-  // = 0.25 so both joints sit inside it. It is merged into the TORSO rather than kept
-  // as its own mesh for two reasons: one fewer draw call per avatar, and it then takes
-  // the swim recolour with the rest of the shirt — bare shoulders are what a swimmer
-  // should have, and a leftover shirt-coloured pad across the shoulders is not.
-  // Centre sits at 0.675 and reaches to 0.75 — deliberately SHORT of the shoulder joint
-  // at 0.80. Pushing it all the way up to the joint is the obvious move and it is wrong:
-  // the head's lower edge is at 0.67, so a yoke topping out at 0.80 buries the bottom
-  // of the face. The DELTOID caps on the arms are what cover the joint itself; this only
-  // has to widen the ribcage out to SHOULDER_X = 0.25 so the caps land on a body.
+  // Top edge is held to waist-frame 0.645 (world 1.625), BELOW the jaw at world 1.65.
+  // The joint itself moved down to 0 when the arms were lowered, so the yoke now sits
+  // under the deltoid caps instead of reaching above them; the caps dress the joint and
+  // this only widens the ribcage the caps land on.
   const yoke = place(
     taper(rbox(0.46, 0.15, TORSO_D * 0.94, 0.05), 0.94, 1.0),
     0,
-    0.675,
+    0.57,
     0,
   )
   const torso = new THREE.Mesh(
@@ -668,14 +675,10 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a, seed: string = rol
 
   neck.add(head)
 
-  // role badge floats above the head; colour-coded by role
-  const badge = new THREE.Mesh(
-    new THREE.TorusGeometry(0.16, 0.032, 8, 20),
-    new THREE.MeshStandardMaterial({ color: accent, emissive: accent, emissiveIntensity: 0.5 }),
-  )
-  badge.rotation.x = Math.PI / 2
-  badge.position.y = 1.98
-  group.add(badge)
+  // NO role badge. There used to be a glowing torus hovering over every head, spinning
+  // and bobbing — a halo on a low-poly body that already has a face, a name label AND a
+  // desk monitor showing its status. It was the loudest thing in the frame and said
+  // nothing the other three did not.
 
   // Collected so the swim swap can strip them with the rest of the shirt (see `skinnable`).
   const cuffs: THREE.Mesh[] = []
@@ -798,7 +801,7 @@ export function buildAvatar(role: AgentRole, skin = 0xe9c19a, seed: string = rol
   })
 
   return {
-    group, chest, neck, head, hips, waist, arms, legs, badge,
+    group, chest, neck, head, hips, waist, arms, legs,
     held: { barbell, barbellGrips, dumbbells, burger, pizza, tongs, bowlingBall },
     skin,
     swimwear: { trunks, skinnable },
